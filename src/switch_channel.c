@@ -25,6 +25,7 @@
  *
  * Anthony Minessale II <anthm@freeswitch.org>
  * Michael Jerris <mike@jerris.com>
+ * Christian Marangi <ansuelsmth@gmail.com> # PCRE2 conversion
  *
  *
  * switch_channel.c -- Media Channel Interface
@@ -33,7 +34,8 @@
 
 #include <switch.h>
 #include <switch_channel.h>
-#include <pcre.h>
+#define PCRE2_CODE_UNIT_WIDTH 8
+#include <pcre2.h>
 
 struct switch_cause_table {
 	const char *name;
@@ -4558,11 +4560,20 @@ SWITCH_DECLARE(switch_status_t) switch_channel_set_timestamps(switch_channel_t *
 				int len = (strlen(dtstr) + strlen(var) + 10) * proceed;
 				int i = 0;
 				const char *replace = NULL;
+				switch_regex_match_data_t match_data = { };
+				PCRE2_SIZE replace_size;
 
 				X = malloc(len);
 
+				/* Init local match_data */
+				match_data.code = re;
+				match_data.rc = proceed;
+				match_data.subject = (PCRE2_SPTR8)dtstr;
+				match_data.ovector = (PCRE2_SIZE *)ovector;
+				match_data.oveccount = (sizeof(ovector) / sizeof(ovector[0])) / 2;
+
 				for (i = 0; i < proceed; i++) {
-					if (pcre_get_substring(dtstr, ovector, proceed, i, &replace) >= 0) {
+					if (pcre2_substring_get_bynumber(&match_data, i, (PCRE2_UCHAR **)&replace, &replace_size) >= 0) {
 						if (replace) {
 							switch_size_t plen = strlen(replace);
 							memset(X, 'X', plen);
@@ -4571,7 +4582,7 @@ SWITCH_DECLARE(switch_status_t) switch_channel_set_timestamps(switch_channel_t *
 							switch_safe_free(substituted);
 							substituted = switch_string_replace(substituted ? substituted : dtstr, replace, X);
 							
-							pcre_free_substring(replace);
+							pcre2_substring_free((PCRE2_UCHAR *)replace);
 						}
 					}
 				}

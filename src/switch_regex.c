@@ -24,39 +24,77 @@
  * Contributor(s):
  *
  * Michael Jerris <mike@jerris.com>
+ * Christian Marangi <ansuelsmth@gmail.com> # PCRE2 conversion
  *
  *
- * switch_regex.c -- PCRE wrapper
+ * switch_regex.c -- PCRE2 wrapper
  *
  */
 
 #include <switch.h>
-#include <pcre.h>
+#define PCRE2_CODE_UNIT_WIDTH 8
+#include <pcre2.h>
 
-SWITCH_DECLARE(switch_regex_t *) switch_regex_compile(const char *pattern,
-													  int options, const char **errorptr, int *erroroffset, const unsigned char *tables)
+/* Preallocated space for a copy of all error  */
+#define SWITCH_REGEX_MAX_ERRORS_TEXT		80
+#define SWITCH_REGEX_MAX_ERRORS_TEXT_LEN	128
+
+static PCRE2_UCHAR8 switch_regex_error_text[SWITCH_REGEX_MAX_ERRORS_TEXT][SWITCH_REGEX_MAX_ERRORS_TEXT_LEN];
+
+SWITCH_DECLARE(switch_regex_t *) switch_regex_compile(const char *pattern, int options, const char **errorptr, int *erroroffset,
+													  const unsigned char *tables)
 {
+	pcre2_compile_context *ccontext = NULL;
+	switch_regex_t *re;
+	int errorcode = 0;
 
-	return (switch_regex_t *)pcre_compile(pattern, options, errorptr, erroroffset, tables);
+	if (tables) {
+		ccontext = pcre2_compile_context_create(NULL);
+		pcre2_set_character_tables(ccontext, tables);
+	}
 
+	re = (switch_regex_t *)pcre2_compile((PCRE2_SPTR)pattern, PCRE2_ZERO_TERMINATED, options, &errorcode, (PCRE2_SIZE *)erroroffset, ccontext);
+	if (errorcode) {
+		pcre2_get_error_message(errorcode, switch_regex_error_text[errorcode], SWITCH_REGEX_MAX_ERRORS_TEXT_LEN);
+		*errorptr = (const char *)switch_regex_error_text[errorcode];
+	}
+
+	pcre2_compile_context_free(ccontext);
+	return re;
 }
 
 SWITCH_DECLARE(int) switch_regex_copy_substring(const char *subject, int *ovector, int stringcount, int stringnumber, char *buffer, int size)
 {
-	return pcre_copy_substring(subject, ovector, stringcount, stringnumber, buffer, size);
+	switch_regex_match_data_t match_data = { };
+	PCRE2_SIZE len = (PCRE2_SIZE)size;
+	switch_regex_t re = { };
+
+	/* Init local re */
+	re.top_bracket = stringcount;
+
+	/* Init local match_data */
+	match_data.code = &re;
+	match_data.rc = stringcount;
+	match_data.subject = (PCRE2_SPTR8)subject;
+	match_data.ovector = (PCRE2_SIZE *)ovector;
+	match_data.oveccount = stringcount;
+
+	return pcre2_substring_copy_bynumber(&match_data, stringnumber, (PCRE2_UCHAR *)buffer, &len);
 }
 
 SWITCH_DECLARE(void) switch_regex_free(void *data)
 {
-	pcre_free(data);
+	pcre2_code_free(data);
 
 }
 
 SWITCH_DECLARE(int) switch_regex_perform(const char *field, const char *expression, switch_regex_t **new_re, int *ovector, uint32_t olen)
 {
-	const char *error = NULL;
-	int erroffset = 0;
-	pcre *re = NULL;
+	int error_code = 0;
+	PCRE2_UCHAR error_str[128];
+	PCRE2_SIZE error_offset = 0;
+	pcre2_code *re = NULL;
+	pcre2_match_data *match_data;
 	int match_count = 0;
 	char *tmp = NULL;
 	uint32_t flags = 0;
@@ -87,40 +125,47 @@ SWITCH_DECLARE(int) switch_regex_perform(const char *field, const char *expressi
 		expression = tmp;
 		if (*opts) {
 			if (strchr(opts, 'i')) {
-				flags |= PCRE_CASELESS;
+				flags |= PCRE2_CASELESS;
 			}
 			if (strchr(opts, 's')) {
-				flags |= PCRE_DOTALL;
+				flags |= PCRE2_DOTALL;
 			}
 		}
 	}
 
-	re = pcre_compile(expression,	/* the pattern */
+	re = pcre2_compile((PCRE2_SPTR)expression,	/* the pattern */
+					  PCRE2_ZERO_TERMINATED,
 					  flags,	/* default options */
-					  &error,	/* for error message */
-					  &erroffset,	/* for error offset */
+					  &error_code,	/* for error code */
+					  &error_offset,	/* for error offset */
 					  NULL);	/* use default character tables */
-	if (error) {
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "COMPILE ERROR: %d [%s][%s]\n", erroffset, error, expression);
-		switch_regex_safe_free(re);
+	if (!re) {
+		pcre2_get_error_message(error_code, error_str, 128);
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "COMPILE ERROR: %zu [%s][%s]\n", error_offset, error_str, expression);
 		goto end;
 	}
 
-	match_count = pcre_exec(re,	/* result of pcre_compile() */
-							NULL,	/* we didn't study the pattern */
-							field,	/* the subject string */
+	/* match_data expects number of pairs, olen / 2 (olen is size of ovector array) */
+	match_data = pcre2_match_data_create(olen / 2, NULL);
+
+	match_count = pcre2_match(re,	/* result of pcre_compile() */
+							(PCRE2_SPTR)field,	/* the subject string */
 							(int) strlen(field),	/* the length of the subject string */
 							0,	/* start at offset 0 in the subject */
 							0,	/* default options */
-							ovector,	/* vector of integers for substring information */
-							olen);	/* number of elements (NOT size in bytes) */
+							match_data,	/* vector of integers for substring information */
+							NULL);	/* number of elements (NOT size in bytes) */
 
 
 	if (match_count <= 0) {
 		switch_regex_safe_free(re);
 		match_count = 0;
+	} else {
+		/* Copy match_data ovector to passed ovector */
+		memcpy(ovector, pcre2_get_ovector_pointer(match_data), olen);
 	}
 
+	pcre2_match_data_free(match_data);
 	*new_re = (switch_regex_t *) re;
 
   end:
@@ -134,11 +179,21 @@ SWITCH_DECLARE(void) switch_perform_substitution(switch_regex_t *re, int match_c
 	char index[10] = "";
 	const char *replace = NULL;
 	switch_size_t x, y = 0, z = 0;
+	switch_regex_match_data_t match_data = { };
+	PCRE2_SIZE replace_size;
 	int num = 0;
 	int brace;
 
+	/* Init local match_data */
+	match_data.code = re;
+	match_data.rc = match_count;
+	match_data.subject = (PCRE2_SPTR8)field_data;
+	match_data.ovector = (PCRE2_SIZE *)ovector;
+	match_data.oveccount = match_count;
+
 	for (x = 0; y < (len - 1) && x < strlen(data);) {
 		if (data[x] == '$') {
+
 			x++;
 
 			brace = data[x] == '{';
@@ -174,14 +229,14 @@ SWITCH_DECLARE(void) switch_perform_substitution(switch_regex_t *re, int match_c
 				num = -1;
 			}
 
-			if (pcre_get_substring(field_data, ovector, match_count, num, &replace) >= 0) {
+			if (pcre2_substring_get_bynumber(&match_data, num, (PCRE2_UCHAR **)&replace, &replace_size) >= 0) {
 				if (replace) {
 					switch_size_t r;
 
 					for (r = 0; r < strlen(replace) && y < (len - 1); r++) {
 						substituted[y++] = replace[r];
 					}
-					pcre_free_substring(replace);
+					pcre2_substring_free((PCRE2_UCHAR *)replace);
 				}
 			}
 		} else {
@@ -200,13 +255,22 @@ SWITCH_DECLARE(void) switch_capture_regex(switch_regex_t *re, int match_count, c
 
 
 	const char *replace;
+	switch_regex_match_data_t match_data = { };
+	PCRE2_SIZE replace_size;
 	int i;
 
+	/* Init local match_data */
+	match_data.code = re;
+	match_data.rc = match_count;
+	match_data.subject = (PCRE2_SPTR8)field_data;
+	match_data.ovector = (PCRE2_SIZE *)ovector;
+	match_data.oveccount = match_count;
+
 	for (i = 0; i < match_count; i++) {
-		if (pcre_get_substring(field_data, ovector, match_count, i, &replace) >= 0) {
+		if (pcre2_substring_get_bynumber(&match_data, i, (PCRE2_UCHAR **)&replace, &replace_size) >= 0) {
 			if (replace) {
-				callback(var, replace, user_data);
-				pcre_free_substring(replace);
+				callback(var, (const char *)replace, user_data);
+				pcre2_substring_free((PCRE2_UCHAR *)replace);
 			}
 		}
 	}
@@ -214,12 +278,13 @@ SWITCH_DECLARE(void) switch_capture_regex(switch_regex_t *re, int match_count, c
 
 SWITCH_DECLARE(switch_status_t) switch_regex_match_partial(const char *target, const char *expression, int *partial)
 {
-	const char *error = NULL;	/* Used to hold any errors                                           */
-	int error_offset = 0;		/* Holds the offset of an error                                      */
-	pcre *pcre_prepared = NULL;	/* Holds the compiled regex                                          */
+	PCRE2_UCHAR error[128]; /* Used to hold any errors                                           */
+	int error_code = 0;	/* Holds the code of an error                                           */
+	PCRE2_SIZE error_offset = 0;		/* Holds the offset of an error                                      */
+	pcre2_code *pcre_prepared = NULL;	/* Holds the compiled regex                                          */
 	int match_count = 0;		/* Number of times the regex was matched                             */
-	int offset_vectors[255];	/* not used, but has to exist or pcre won't even try to find a match */
-	int pcre_flags = 0;
+	pcre2_match_data *match_data;
+	int pcre2_flags = 0;
 	uint32_t flags = 0;
 	char *tmp = NULL;
 	switch_status_t status = SWITCH_STATUS_FALSE;
@@ -239,43 +304,44 @@ SWITCH_DECLARE(switch_status_t) switch_regex_match_partial(const char *target, c
 		expression = tmp;
 		if (*opts) {
 			if (strchr(opts, 'i')) {
-				flags |= PCRE_CASELESS;
+				flags |= PCRE2_CASELESS;
 			}
 			if (strchr(opts, 's')) {
-				flags |= PCRE_DOTALL;
+				flags |= PCRE2_DOTALL;
 			}
 		}
 	}
 
 	/* Compile the expression */
-	pcre_prepared = pcre_compile(expression, flags, &error, &error_offset, NULL);
+	pcre_prepared = pcre2_compile((PCRE2_SPTR)expression, PCRE2_ZERO_TERMINATED, flags, &error_code, &error_offset, NULL);
 
 	/* See if there was an error in the expression */
-	if (error != NULL) {
-		/* Clean up after ourselves */
-		if (pcre_prepared) {
-			pcre_free(pcre_prepared);
-			pcre_prepared = NULL;
-		}
+	if (!pcre_prepared) {
+		pcre2_get_error_message(error_code, error, 128);
+
 		/* Note our error */
 		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
-						  "Regular Expression Error expression[%s] error[%s] location[%d]\n", expression, error, error_offset);
+						  "Regular Expression Error expression[%s] error[%s] location[%zu]\n", expression, error, error_offset);
 
 		/* We definitely didn't match anything */
 		goto end;
 	}
 
 	if (*partial) {
-		pcre_flags = PCRE_PARTIAL;
+		pcre2_flags = PCRE2_PARTIAL_SOFT;
 	}
 
 	/* So far so good, run the regex */
+	match_data = pcre2_match_data_create_from_pattern(pcre_prepared, NULL);
+
 	match_count =
-		pcre_exec(pcre_prepared, NULL, target, (int) strlen(target), 0, pcre_flags, offset_vectors, sizeof(offset_vectors) / sizeof(offset_vectors[0]));
+		pcre2_match(pcre_prepared, (PCRE2_SPTR)target, (int) strlen(target), 0, pcre2_flags, match_data, NULL);
+
+	pcre2_match_data_free(match_data);
 
 	/* Clean up */
 	if (pcre_prepared) {
-		pcre_free(pcre_prepared);
+		pcre2_code_free(pcre_prepared);
 		pcre_prepared = NULL;
 	}
 
@@ -285,7 +351,7 @@ SWITCH_DECLARE(switch_status_t) switch_regex_match_partial(const char *target, c
 	if (match_count > 0) {
 		*partial = 0;
 		switch_goto_status(SWITCH_STATUS_SUCCESS, end);
-	} else if (match_count == PCRE_ERROR_PARTIAL || match_count == PCRE_ERROR_BADPARTIAL) {
+	} else if (match_count == PCRE2_ERROR_PARTIAL) {
 		/* yes it is already set, but the code is clearer this way */
 		*partial = 1;
 		switch_goto_status(SWITCH_STATUS_SUCCESS, end);

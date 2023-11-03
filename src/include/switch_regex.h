@@ -24,8 +24,9 @@
  * Contributor(s):
  *
  * Michael Jerris <mike@jerris.com>
+ * Christian Marangi <ansuelsmth@gmail.com> # PCRE2 conversion
  *
- * switch_regex.h -- pcre wrapper and extensions Header
+ * switch_regex.h -- pcre2 wrapper and extensions Header
  *
  */
 /*! \file switch_regex.h
@@ -35,12 +36,63 @@
 #define SWITCH_REGEX_H
 
 SWITCH_BEGIN_EXTERN_C
+
+#define PCRE2_CODE_UNIT_WIDTH 8
+#include <pcre2.h>
+
+typedef struct pcre2_memctl {
+  void *    (*malloc)(size_t, void *);
+  void      (*free)(void *, void *);
+  void      *memory_data;
+} pcre2_memctl;
+
+#define CODE_BLOCKSIZE_TYPE size_t
+
+typedef struct pcre2_real_code {
+  pcre2_memctl memctl;            /* Memory control fields */
+  const uint8_t *tables;          /* The character tables */
+  void    *executable_jit;        /* Pointer to JIT code */
+  uint8_t  start_bitmap[32];      /* Bitmap for starting code unit < 256 */
+  CODE_BLOCKSIZE_TYPE blocksize;  /* Total (bytes) that was malloc-ed */
+  uint32_t magic_number;          /* Paranoid and endianness check */
+  uint32_t compile_options;       /* Options passed to pcre2_compile() */
+  uint32_t overall_options;       /* Options after processing the pattern */
+  uint32_t flags;                 /* Various state flags */
+  uint32_t limit_match;           /* Limit set in the pattern */
+  uint32_t limit_recursion;       /* Limit set in the pattern */
+  uint32_t first_codeunit;        /* Starting code unit */
+  uint32_t last_codeunit;         /* This codeunit must be seen */
+  uint16_t bsr_convention;        /* What \R matches */
+  uint16_t newline_convention;    /* What is a newline? */
+  uint16_t max_lookbehind;        /* Longest lookbehind (characters) */
+  uint16_t minlength;             /* Minimum length of match */
+  uint16_t top_bracket;           /* Highest numbered group */
+  uint16_t top_backref;           /* Highest numbered back reference */
+  uint16_t name_entry_size;       /* Size (code units) of table entries */
+  uint16_t name_count;            /* Number of name entries in the table */
+} pcre2_real_code;
+
+typedef struct pcre2_real_match_data {
+  pcre2_memctl     memctl;
+  const pcre2_real_code *code;    /* The pattern used for the match */
+  PCRE2_SPTR       subject;       /* The subject that was matched */
+  PCRE2_SPTR       mark;          /* Pointer to last mark */
+  PCRE2_SIZE       leftchar;      /* Offset to leftmost code unit */
+  PCRE2_SIZE       rightchar;     /* Offset to rightmost code unit */
+  PCRE2_SIZE       startchar;     /* Offset to starting code unit */
+  uint16_t         matchedby;     /* Type of match (normal, JIT, DFA) */
+  uint16_t         oveccount;     /* Number of pairs */
+  int              rc;            /* The return code from the match */
+  PCRE2_SIZE       *ovector;    /* The first field */
+} pcre2_real_match_data;
+
 /**
  * @defgroup switch_regex Regular Expressions
  * @ingroup FREESWITCH
  * @{
  */
-	typedef struct real_pcre switch_regex_t;
+	typedef struct pcre2_real_code switch_regex_t;
+	typedef struct pcre2_real_match_data switch_regex_match_data_t;
 
 SWITCH_DECLARE(switch_regex_t *) switch_regex_compile(const char *pattern, int options, const char **errorptr, int *erroroffset,
 													  const unsigned char *tables);

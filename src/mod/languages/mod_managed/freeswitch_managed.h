@@ -135,7 +135,7 @@ struct sqlite3 {
 struct switch_ivr_digit_stream {
 	char foo[];
 };
-struct real_pcre {
+struct real_pcre2 {
 	char foo[];
 };
 struct HashElem {
